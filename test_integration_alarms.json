@@ -1,0 +1,23 @@
+[
+  {
+    "id": "f142f4b9-674d-4571-839e-bfb9b8545c0a",
+    "time_str": "15:00",
+    "repeat_daily": false,
+    "enabled": true,
+    "audio_file": null
+  },
+  {
+    "id": "0271fcc0-c7a4-49e1-a20e-67dd3a389fbd",
+    "time_str": "14:30",
+    "repeat_daily": true,
+    "enabled": true,
+    "audio_file": null
+  },
+  {
+    "id": "7690781f-acfb-4f8d-bb43-0ffc0c3e8870",
+    "time_str": "15:00",
+    "repeat_daily": false,
+    "enabled": true,
+    "audio_file": null
+  }
+]
