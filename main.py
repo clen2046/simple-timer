@@ -43,12 +43,7 @@ def main():
         # 保存设置
         gui._save_all_alarms()
 
-        # 停止闹钟管理器
-        alarm_manager.stop()
-
-        # 停止音频播放
-        audio_player.stop()
-
+        # 注意：不停止闹钟管理器和音频播放器，保持后台运行
         # 隐藏窗口（不退出，进入系统托盘）
         root.withdraw()
 

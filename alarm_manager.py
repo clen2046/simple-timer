@@ -20,36 +20,54 @@ class Alarm:
         self.enabled = enabled
         self.audio_file = audio_file  # None表示使用默认音乐
         self.message = message  # 提醒内容
-        self.last_triggered: Optional[datetime] = None  # 上次触发时间
+        # 初始化last_triggered为当前时间的整分钟（避免立即触发）
+        now = datetime.now()
+        # 设置为当前分钟的起始（秒和微秒归零）
+        self.last_triggered = datetime(now.year, now.month, now.day, now.hour, now.minute, 0, 0)
+        # 线程锁，保护should_trigger方法的并发访问
+        self.lock = threading.RLock()
 
     @property
     def time(self):
         """解析时间字符串为datetime.time对象"""
-        return datetime.strptime(self.time_str, "%H:%M").time()
+        try:
+            return datetime.strptime(self.time_str, "%H:%M").time()
+        except ValueError:
+            # 如果时间格式无效，返回默认时间（午夜）并记录错误
+            print(f"警告：无效的时间格式 '{self.time_str}'，使用00:00代替")
+            return datetime.strptime("00:00", "%H:%M").time()
 
     def should_trigger(self, current_time: datetime) -> bool:
         """检查是否应该触发闹钟"""
-        if not self.enabled:
-            return False
-
-        current_time_only = current_time.time()
-        alarm_time = self.time
-
-        # 检查时间是否匹配
-        time_matches = (current_time_only.hour == alarm_time.hour and
-                       current_time_only.minute == alarm_time.minute)
-
-        if not time_matches:
-            return False
-
-        # 检查是否已经触发过（避免一分钟内多次触发）
-        if self.last_triggered:
-            time_diff = current_time - self.last_triggered
-            if time_diff.total_seconds() < 55:  # 55秒内不重复触发
+        with self.lock:
+            if not self.enabled:
                 return False
 
-        self.last_triggered = current_time
-        return True
+            current_time_only = current_time.time()
+            alarm_time = self.time
+
+            # 检查时间是否匹配
+            time_matches = (current_time_only.hour == alarm_time.hour and
+                           current_time_only.minute == alarm_time.minute)
+
+            if not time_matches:
+                return False
+
+            # 检查是否已经触发过
+            if self.last_triggered:
+                # 如果是非重复闹钟，只触发一次
+                if not self.repeat_daily:
+                    return False
+
+                # 重复闹钟：检查是否在同一天同一分钟已经触发过
+                if (self.last_triggered.date() == current_time.date() and
+                    self.last_triggered.hour == current_time.hour and
+                    self.last_triggered.minute == current_time.minute):
+                    return False
+
+            # 记录触发时间
+            self.last_triggered = current_time
+            return True
 
     def to_dict(self) -> dict:
         """转换为字典用于序列化"""
@@ -85,6 +103,7 @@ class AlarmManager:
         self.paused = False
         self.check_thread: Optional[threading.Thread] = None
         self.on_alarm_trigger: Optional[Callable[[Alarm], None]] = None  # 回调函数
+        self.lock = threading.RLock()  # 可重入线程锁，保护alarms字典
 
         # 确保配置文件目录存在
         config_dir = os.path.dirname(config_file)
@@ -96,43 +115,47 @@ class AlarmManager:
         """添加新闹钟"""
         alarm_id = str(uuid.uuid4())
         alarm = Alarm(alarm_id, time_str, repeat_daily, True, audio_file)
-        self.alarms[alarm_id] = alarm
+        with self.lock:
+            self.alarms[alarm_id] = alarm
         self.save_alarms()
         return alarm_id
 
     def remove_alarm(self, alarm_id: str) -> bool:
         """删除闹钟"""
-        if alarm_id in self.alarms:
-            del self.alarms[alarm_id]
-            self.save_alarms()
-            return True
+        with self.lock:
+            if alarm_id in self.alarms:
+                del self.alarms[alarm_id]
+                self.save_alarms()
+                return True
         return False
 
     def toggle_alarm(self, alarm_id: str) -> bool:
         """切换闹钟启用状态"""
-        if alarm_id in self.alarms:
-            self.alarms[alarm_id].enabled = not self.alarms[alarm_id].enabled
-            self.save_alarms()
-            return self.alarms[alarm_id].enabled
+        with self.lock:
+            if alarm_id in self.alarms:
+                self.alarms[alarm_id].enabled = not self.alarms[alarm_id].enabled
+                self.save_alarms()
+                return self.alarms[alarm_id].enabled
         return False
 
     def update_alarm(self, alarm_id: str, time_str: str = None,
                      repeat_daily: bool = None, enabled: bool = None,
                      audio_file: str = None) -> bool:
         """更新闹钟属性"""
-        if alarm_id not in self.alarms:
-            return False
+        with self.lock:
+            if alarm_id not in self.alarms:
+                return False
 
-        alarm = self.alarms[alarm_id]
+            alarm = self.alarms[alarm_id]
 
-        if time_str is not None:
-            alarm.time_str = time_str
-        if repeat_daily is not None:
-            alarm.repeat_daily = repeat_daily
-        if enabled is not None:
-            alarm.enabled = enabled
-        if audio_file is not None:
-            alarm.audio_file = audio_file
+            if time_str is not None:
+                alarm.time_str = time_str
+            if repeat_daily is not None:
+                alarm.repeat_daily = repeat_daily
+            if enabled is not None:
+                alarm.enabled = enabled
+            if audio_file is not None:
+                alarm.audio_file = audio_file
 
         self.save_alarms()
         return True
@@ -166,7 +189,10 @@ class AlarmManager:
         while self.running:
             if not self.paused:
                 current_time = datetime.now()
-                for alarm in self.alarms.values():
+                # 复制闹钟列表以避免迭代时字典被修改
+                with self.lock:
+                    alarms = list(self.alarms.values())
+                for alarm in alarms:
                     if alarm.should_trigger(current_time):
                         if self.on_alarm_trigger:
                             self.on_alarm_trigger(alarm)
@@ -174,7 +200,8 @@ class AlarmManager:
 
     def save_alarms(self):
         """保存闹钟到配置文件"""
-        alarms_data = [alarm.to_dict() for alarm in self.alarms.values()]
+        with self.lock:
+            alarms_data = [alarm.to_dict() for alarm in self.alarms.values()]
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(alarms_data, f, indent=2)
@@ -187,25 +214,30 @@ class AlarmManager:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     alarms_data = json.load(f)
-                self.alarms = {
-                    alarm_data['id']: Alarm.from_dict(alarm_data)
-                    for alarm_data in alarms_data
-                }
+                with self.lock:
+                    self.alarms = {
+                        alarm_data['id']: Alarm.from_dict(alarm_data)
+                        for alarm_data in alarms_data
+                    }
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"加载闹钟配置失败，使用空配置: {e}")
-            self.alarms = {}
+            with self.lock:
+                self.alarms = {}
 
     def get_alarm(self, alarm_id: str) -> Optional[Alarm]:
         """获取指定ID的闹钟"""
-        return self.alarms.get(alarm_id)
+        with self.lock:
+            return self.alarms.get(alarm_id)
 
     def get_all_alarms(self) -> list:
         """获取所有闹钟列表"""
-        return list(self.alarms.values())
+        with self.lock:
+            return list(self.alarms.values())
 
     def clear_all(self):
         """清除所有闹钟"""
-        self.alarms.clear()
+        with self.lock:
+            self.alarms.clear()
         self.save_alarms()
 
 

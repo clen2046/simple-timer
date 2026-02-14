@@ -132,24 +132,72 @@ class TimerGUI:
         self._create_scrollable_alarms_frame(alarms_frame)
 
     def _create_scrollable_alarms_frame(self, parent):
-        """创建闹钟列表区域（不滚动）"""
+        """创建闹钟列表区域（支持鼠标滚轮）"""
         # 创建Canvas和Scrollbar
         self.alarms_canvas = tk.Canvas(parent)
-        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.alarms_canvas.yview)
+        self.scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.alarms_canvas.yview)
         self.scrollable_frame = ttk.Frame(self.alarms_canvas)
 
         # 配置滚动区域
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.alarms_canvas.configure(scrollregion=self.alarms_canvas.bbox("all"))
-        )
+        def update_scrollregion(e=None):
+            self.alarms_canvas.configure(scrollregion=self.alarms_canvas.bbox("all"))
+            self._check_scroll_needed()
+
+        self.scrollable_frame.bind("<Configure>", update_scrollregion)
 
         self.alarms_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.alarms_canvas.configure(yscrollcommand=scrollbar.set)
+        self.alarms_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # 绑定鼠标滚轮事件
+        def on_mousewheel(event):
+            # 只在需要滚动时响应滚轮
+            if self._is_scroll_needed():
+                self.alarms_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # 绑定到Canvas和scrollable_frame
+        self.alarms_canvas.bind("<MouseWheel>", on_mousewheel)
+        self.scrollable_frame.bind("<MouseWheel>", on_mousewheel)
 
         # 布局
         self.alarms_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 初始检查滚动需求
+        self.root.after(100, self._check_scroll_needed)
+
+    def _is_scroll_needed(self) -> bool:
+        """检查是否需要滚动条"""
+        if not hasattr(self, 'alarms_canvas') or not hasattr(self, 'scrollable_frame'):
+            return False
+
+        try:
+            # 获取Canvas和scrollable_frame的高度
+            self.root.update_idletasks()  # 确保布局已更新
+            canvas_height = self.alarms_canvas.winfo_height()
+            frame_height = self.scrollable_frame.winfo_height()
+
+            # 如果Canvas高度为0（尚未渲染），返回False
+            if canvas_height <= 0:
+                return False
+
+            return frame_height > canvas_height
+        except Exception:
+            # 如果发生任何异常（如widget被销毁），返回False
+            return False
+
+    def _check_scroll_needed(self):
+        """根据内容高度显示或隐藏滚动条"""
+        try:
+            if not hasattr(self, 'scrollbar'):
+                return
+
+            if self._is_scroll_needed():
+                self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            else:
+                self.scrollbar.pack_forget()
+        except Exception:
+            # 忽略滚动条更新时的异常
+            pass
 
     def _add_alarm_input(self, time_str: str = "", repeat_daily: bool = True,
                          enabled: bool = True, alarm_id: str = None,
@@ -266,7 +314,7 @@ class TimerGUI:
         delete_btn = ttk.Button(
             row,
             text="删除",
-            command=lambda: self._remove_alarm_input(frame, alarm_id),
+            command=lambda f=frame: self._remove_alarm_input(f),
             width=5
         )
         delete_btn.pack(side=tk.RIGHT)
@@ -291,6 +339,13 @@ class TimerGUI:
 
         self.alarm_frames.append(frame.alarm_data)
 
+        # 如果是新增闹钟（不是加载现有闹钟），立即保存
+        if alarm_id is None:
+            self._save_all_alarms()
+
+        # 更新滚动条状态
+        self.root.after(100, self._check_scroll_needed)
+
     def _select_music_file(self):
         """选择全局默认音乐文件"""
         file_path = filedialog.askopenfilename(
@@ -305,11 +360,13 @@ class TimerGUI:
             self.audio_player.default_audio_path = file_path
             self.music_var.set(f"音乐: {os.path.basename(file_path)}")
 
-    def _remove_alarm_input(self, frame, alarm_id: str = None):
+    def _remove_alarm_input(self, frame):
         """删除闹钟输入行"""
         # 从alarm_frames列表中删除
+        alarm_id = None
         for i, alarm_data in enumerate(self.alarm_frames):
             if alarm_data['frame'] == frame:
+                alarm_id = alarm_data.get('alarm_id')
                 del self.alarm_frames[i]
                 break
 
@@ -318,6 +375,9 @@ class TimerGUI:
         # 如果有关联的闹钟ID，从管理器删除
         if alarm_id:
             self.alarm_manager.remove_alarm(alarm_id)
+
+        # 更新滚动条状态
+        self.root.after(100, self._check_scroll_needed)
 
     def _load_existing_alarms(self):
         """加载现有闹钟到GUI"""
@@ -332,50 +392,57 @@ class TimerGUI:
             )
 
     def _validate_time_format(self, time_str: str) -> bool:
-        """验证时间格式（下拉框模式下始终有效）"""
-        return True
+        """验证时间格式（HH:MM）"""
+        try:
+            from datetime import datetime
+            datetime.strptime(time_str, "%H:%M")
+            return True
+        except ValueError:
+            return False
 
     def _save_all_alarms(self):
         """保存所有闹钟设置"""
-        # 清除所有现有闹钟
-        self.alarm_manager.alarms.clear()
-
         # 占位符文本（不应保存）
         placeholder_text = "请输入提醒内容"
 
-        # 重新添加所有GUI中的闹钟
-        for alarm_data in self.alarm_frames:
-            time_str = alarm_data['time_var'].get()
-            repeat_daily = alarm_data['repeat_var'].get()
-            enabled = alarm_data['enabled_var'].get()
-            audio_file = alarm_data['audio_var'].get() or None
-            message = alarm_data['message_var'].get() or ""
+        # 在锁内更新闹钟管理器中的闹钟
+        with self.alarm_manager.lock:
+            # 清除所有现有闹钟
+            self.alarm_manager.alarms.clear()
 
-            # 如果是占位符文本，清空
-            if message == placeholder_text:
-                message = ""
+            # 重新添加所有GUI中的闹钟
+            for alarm_data in self.alarm_frames:
+                time_str = alarm_data['time_var'].get()
+                repeat_daily = alarm_data['repeat_var'].get()
+                enabled = alarm_data['enabled_var'].get()
+                audio_file = alarm_data['audio_var'].get() or None
+                message = alarm_data['message_var'].get() or ""
 
-            # 验证时间格式
-            if not self._validate_time_format(time_str):
-                continue  # 跳过无效的时间
+                # 如果是占位符文本，清空
+                if message == placeholder_text:
+                    message = ""
 
-            # 使用现有ID或生成新ID
-            alarm_id = alarm_data['alarm_id']
-            if not alarm_id:
-                import uuid
-                alarm_id = str(uuid.uuid4())
-                alarm_data['alarm_id'] = alarm_id
+                # 验证时间格式
+                if not self._validate_time_format(time_str):
+                    continue  # 跳过无效的时间
 
-            # 创建闹钟对象
-            alarm = Alarm(
-                alarm_id=alarm_id,
-                time_str=time_str,
-                repeat_daily=repeat_daily,
-                enabled=enabled,
-                audio_file=audio_file,
-                message=message
-            )
-            self.alarm_manager.alarms[alarm_id] = alarm
+                # 使用现有ID或生成新ID
+                alarm_id = alarm_data['alarm_id']
+                if not alarm_id:
+                    import uuid
+                    alarm_id = str(uuid.uuid4())
+                    alarm_data['alarm_id'] = alarm_id
+
+                # 创建闹钟对象
+                alarm = Alarm(
+                    alarm_id=alarm_id,
+                    time_str=time_str,
+                    repeat_daily=repeat_daily,
+                    enabled=enabled,
+                    audio_file=audio_file,
+                    message=message
+                )
+                self.alarm_manager.alarms[alarm_id] = alarm
 
         self.alarm_manager.save_alarms()
 
@@ -425,12 +492,7 @@ class TimerGUI:
         # 保存设置
         self._save_all_alarms()
 
-        # 停止闹钟管理器
-        self.alarm_manager.stop()
-
-        # 停止音频播放
-        self.audio_player.stop()
-
+        # 注意：不停止闹钟管理器和音频播放器，保持后台运行
         # 关闭所有提醒对话框
         for dialog in self.active_dialogs[:]:
             try:
